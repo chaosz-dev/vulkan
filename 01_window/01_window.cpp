@@ -251,6 +251,7 @@ bool FindGoodSurfaceFormat(
 }
 
 VkResult CreateSwapchain(
+    const VkPhysicalDevice      phyDevice,
     const VkDevice              device,
     const VkSurfaceKHR          surface,
     const VkSurfaceFormatKHR    surfaceFormat,
@@ -258,7 +259,10 @@ VkResult CreateSwapchain(
     const uint32_t              height,
     VkSwapchainKHR*             outSwapchain) {
 
-    uint32_t imageCount = 4;
+    VkSurfaceCapabilitiesKHR capabilities;
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(phyDevice, surface, &capabilities);
+
+    uint32_t imageCount = capabilities.minImageCount;
     const VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR;
 
     VkSwapchainCreateInfoKHR createInfo = {
@@ -275,7 +279,7 @@ VkResult CreateSwapchain(
         .imageSharingMode       = VK_SHARING_MODE_EXCLUSIVE,
         .queueFamilyIndexCount  = 0,
         .pQueueFamilyIndices    = nullptr,
-        .preTransform           = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
+        .preTransform           = capabilities.currentTransform,
         .compositeAlpha         = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
         .presentMode            = presentMode,
         .clipped                = VK_TRUE,
@@ -285,6 +289,226 @@ VkResult CreateSwapchain(
     return vkCreateSwapchainKHR(device, &createInfo, nullptr, outSwapchain);
 }
 
+std::vector<VkImage> GetSwapchainImages(const VkDevice device, const VkSwapchainKHR swapchain) {
+    uint32_t imageCount = 0;
+    vkGetSwapchainImagesKHR(device, swapchain, &imageCount, nullptr);
+
+    std::vector<VkImage> images(imageCount);
+    vkGetSwapchainImagesKHR(device, swapchain, &imageCount, images.data());
+
+    return images;
+}
+
+void DestroyImageViews(const VkDevice device, std::vector<VkImageView>& views) {
+    for (size_t idx = 0; idx < views.size(); idx++) {
+        vkDestroyImageView(device, views[idx], nullptr);
+        views[idx] = VK_NULL_HANDLE;
+    }
+}
+
+std::vector<VkImageView> Create2DImageViews(
+    const VkDevice              device,
+    const VkFormat              format,
+    const std::vector<VkImage>& images) {
+
+    VkImageViewCreateInfo createInfo = {
+        .sType          = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .pNext          = nullptr,
+        .flags          = 0,
+        .image          = VK_NULL_HANDLE,   // will be updated below
+        .viewType       = VK_IMAGE_VIEW_TYPE_2D,
+        .format         = format,
+        .components     = {
+            .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+            .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+            .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+            .a = VK_COMPONENT_SWIZZLE_IDENTITY },
+        .subresourceRange = {
+            .aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel   = 0,
+            .levelCount     = 1,
+            .baseArrayLayer = 0,
+            .layerCount     = 1,
+        }
+    };
+
+    std::vector<VkImageView> views(images.size(), VK_NULL_HANDLE);
+
+    for (size_t idx = 0; idx < images.size(); idx++) {
+        createInfo.image = images[idx];
+
+
+        VkResult result = vkCreateImageView(device, &createInfo, nullptr, &views[idx]);
+        if (result != VK_SUCCESS) {
+            DestroyImageViews(device, views);
+            return {};
+        }
+    }
+
+    return views;
+}
+
+VkResult CreateCommandPool(const VkDevice device, const uint32_t queueFamilyIdx, VkCommandPool* outCmdPool) {
+    VkCommandPoolCreateInfo createInfo = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        .queueFamilyIndex = queueFamilyIdx,
+    };
+
+    return vkCreateCommandPool(device, &createInfo, nullptr, outCmdPool);
+}
+
+VkResult CreateSimpleRenderPass(
+    const VkDevice      device,
+    const VkFormat      colorFormat,
+    VkRenderPass*       outRenderPass) {
+
+    const VkAttachmentDescription colorAttachments[] = {
+        {
+            .flags          = 0,
+            .format         = colorFormat,
+            .samples        = VK_SAMPLE_COUNT_1_BIT,
+            .loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp        = VK_ATTACHMENT_STORE_OP_STORE,
+            .stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED,
+            .finalLayout    = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        },
+    };
+
+    VkAttachmentReference colorAttachmentRef = {
+        .attachment = 0,
+        .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    };
+
+    const VkSubpassDescription subpass = {
+        .flags                       = 0,
+        .pipelineBindPoint          = VK_PIPELINE_BIND_POINT_GRAPHICS,
+        .inputAttachmentCount       = 0,
+        .pInputAttachments          = NULL,
+        .colorAttachmentCount       = 1,
+        .pColorAttachments          = &colorAttachmentRef,
+        .pResolveAttachments        = NULL,
+        .pDepthStencilAttachment    = NULL,
+        .preserveAttachmentCount    = 0,
+        .pPreserveAttachments       = NULL,
+    };
+
+    VkRenderPassCreateInfo createInfo = {
+        .sType              = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+        .pNext              = nullptr,
+        .flags              = 0,
+        .attachmentCount    = std::size(colorAttachments),
+        .pAttachments       = colorAttachments,
+        .subpassCount       = 1,
+        .pSubpasses         = &subpass,
+        .dependencyCount    = 0,
+        .pDependencies      = NULL,
+    };
+
+    return vkCreateRenderPass(device, &createInfo, nullptr, outRenderPass);
+}
+
+
+std::vector<VkCommandBuffer> AllocateCommandBuffers(
+    const VkDevice          device,
+    const VkCommandPool     cmdPool,
+    const uint32_t          count) {
+    std::vector<VkCommandBuffer> cmdBuffers(count, VK_NULL_HANDLE);
+
+    VkCommandBufferAllocateInfo allocInfo = {
+        .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .pNext              = nullptr,
+        .commandPool        = cmdPool,
+        .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = (uint32_t)cmdBuffers.size(),
+    };
+
+    // TODO: check result
+    vkAllocateCommandBuffers(device, &allocInfo, cmdBuffers.data());
+
+    return cmdBuffers;
+}
+
+void DestroyFramebuffers(const VkDevice device, std::vector<VkFramebuffer>& framebuffers) {
+    for (size_t idx = 0; idx < framebuffers.size(); idx++) {
+        vkDestroyFramebuffer(device, framebuffers[idx], nullptr);
+        framebuffers[idx] = VK_NULL_HANDLE;
+    }
+}
+
+std::vector<VkFramebuffer> CreateSimpleFramebuffers(
+    const VkDevice                  device,
+    const VkRenderPass              renderPass,
+    const uint32_t                  width,
+    const uint32_t                  height,
+    const std::vector<VkImageView>& renderViews) {
+
+    std::vector<VkFramebuffer> framebuffers(renderViews.size(), VK_NULL_HANDLE);
+
+    VkFramebufferCreateInfo createInfo = {
+        .sType              = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+        .pNext              = NULL,
+        .flags              = 0,
+        .renderPass         = renderPass,
+        .attachmentCount    = 1,
+        .pAttachments       = nullptr, // specified below
+        .width              = width,
+        .height             = height,
+        .layers             = 1,
+    };
+
+    for (size_t idx = 0; idx < renderViews.size(); idx++) {
+        createInfo.pAttachments = &renderViews[idx];
+
+        VkResult result = vkCreateFramebuffer(device, &createInfo, nullptr, &framebuffers[idx]);
+        if (result != VK_SUCCESS) {
+            DestroyFramebuffers(device, framebuffers);
+            return {};
+        }
+    }
+
+    return framebuffers;
+}
+
+
+VkFence CreateFence(const VkDevice device) {
+   VkFenceCreateInfo createInfo = {
+        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        .pNext = 0,
+        .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+    };
+
+    VkFence fence = VK_NULL_HANDLE;
+    vkCreateFence(device, &createInfo, nullptr, &fence);
+
+    return fence;
+}
+
+VkSemaphore CreateSemaphore(const VkDevice device) {
+    VkSemaphoreCreateInfo createInfo = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        .pNext = NULL,
+        .flags = 0,
+    };
+
+    VkSemaphore semaphore = VK_NULL_HANDLE;
+    vkCreateSemaphore(device, &createInfo, nullptr, &semaphore);
+
+    return semaphore;
+}
+
+
+void KeyCallback(GLFWwindow* window, int key, int /*scancode*/, int /*action*/, int /*mods*/) {
+    switch (key) {
+        case GLFW_KEY_ESCAPE: {
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
+            break;
+        }
+    }
+}
 
 int main(int /*argc*/, char **/*argv*/) {
 
@@ -326,6 +550,9 @@ int main(int /*argc*/, char **/*argv*/) {
     uint32_t windowHeight = 512;
     GLFWwindow *window    = glfwCreateWindow(windowWidth, windowHeight, "01_window GLFW", NULL, NULL);
 
+    glfwSetWindowUserPointer(window, nullptr);
+    glfwSetKeyCallback(window, KeyCallback);
+
     // We have the window, the instance, create a surface from the window to draw onto.
     // Create a Vulkan Surface using GLFW.
     // By using GLFW the current windowing system's surface is created (xcb, win32, etc..)
@@ -354,13 +581,115 @@ int main(int /*argc*/, char **/*argv*/) {
     const std::vector<VkFormat> preferredFormats
         = {VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM};
 
-    VkSurfaceFormatKHR selectedSurfaceFormat = {};
-    FindGoodSurfaceFormat(phyDevice, surface, preferredFormats, &selectedSurfaceFormat);
+    VkSurfaceFormatKHR surfaceInfo = {};
+    FindGoodSurfaceFormat(phyDevice, surface, preferredFormats, &surfaceInfo);
 
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
-    CreateSwapchain(device, surface, selectedSurfaceFormat, windowWidth, windowHeight, &swapchain);
+    CreateSwapchain(phyDevice, device, surface, surfaceInfo, windowWidth, windowHeight, &swapchain); // TODO: check result
+
+    std::vector<VkImage> swapchainImages    = GetSwapchainImages(device, swapchain);
+    std::vector<VkImageView> swapchainViews = Create2DImageViews(device, surfaceInfo.format, swapchainImages);
+
+    VkCommandPool cmdPool = VK_NULL_HANDLE;
+    CreateCommandPool(device, queueFamilyIdx, &cmdPool); // TODO: check result
+
+    std::vector<VkCommandBuffer> cmdBuffers = AllocateCommandBuffers(device, cmdPool, swapchainImages.size());
+
+    VkRenderPass renderPass = VK_NULL_HANDLE;
+    CreateSimpleRenderPass(device, surfaceInfo.format, &renderPass); // TODO: check result
+
+    std::vector<VkFramebuffer> framebuffers = CreateSimpleFramebuffers(device, renderPass, windowWidth, windowHeight, swapchainViews);
+
+    VkFence imageFence              = CreateFence(device);
+    VkSemaphore presentSemaphore    = CreateSemaphore(device);
+
+    glfwShowWindow(window);
+
+    uint32_t color = 0;
+    while (!glfwWindowShouldClose(window)) {
+        glfwPollEvents();
+
+        vkResetFences(device, 1, &imageFence);
+
+        uint32_t swapchainIdx = -1;
+        vkAcquireNextImageKHR(device, swapchain, -1, VK_NULL_HANDLE, imageFence, &swapchainIdx);
+        vkWaitForFences(device, 1, &imageFence, VK_TRUE, UINT64_MAX);
 
 
+        VkCommandBuffer cmdBuffer = cmdBuffers[swapchainIdx];
+
+        {
+            VkCommandBufferBeginInfo beginInfo = {
+                .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                .pNext              = nullptr,
+                .flags              = 0,
+                .pInheritanceInfo   = nullptr,
+            };
+
+            vkBeginCommandBuffer(cmdBuffer, &beginInfo);
+
+            color = (color + 1) % 255;
+
+            VkClearValue clearColor = { { { color / 255.0f, 0.0f, 0.0f, 1.0f } } };
+            VkRenderPassBeginInfo renderPassInfo = {
+                .sType          = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+                .pNext          = nullptr,
+                .renderPass     = renderPass,
+                .framebuffer    = framebuffers[swapchainIdx],
+                .renderArea     = {
+                    .offset = { 0, 0 },
+                    .extent = { (uint32_t)windowWidth, (uint32_t)windowHeight },
+                },
+                .clearValueCount = 1,
+                .pClearValues = &clearColor,
+            };
+
+            vkCmdBeginRenderPass(cmdBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+            vkCmdEndRenderPass(cmdBuffer);
+
+            vkEndCommandBuffer(cmdBuffer);
+        }
+
+        VkSubmitInfo submitInfo = {
+            .sType                  = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .pNext                  = nullptr,
+            .waitSemaphoreCount     = 0,
+            .pWaitSemaphores        = nullptr,
+            .pWaitDstStageMask      = nullptr,
+            .commandBufferCount     = 1,
+            .pCommandBuffers        = &cmdBuffer,
+            .signalSemaphoreCount   = 1,
+            .pSignalSemaphores      = &presentSemaphore,
+        };
+
+        vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+
+        VkPresentInfoKHR presentInfo = {
+            .sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .pNext              = 0,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores    = &presentSemaphore,
+            .swapchainCount     = 1,
+            .pSwapchains        = &swapchain,
+            .pImageIndices      = &swapchainIdx,
+            .pResults           = nullptr,
+        };
+
+        vkQueuePresentKHR(queue, &presentInfo);
+
+        vkDeviceWaitIdle(device);
+    }
+
+    vkDestroyFence(device, imageFence, nullptr);
+    vkDestroySemaphore(device, presentSemaphore, nullptr);
+
+    DestroyFramebuffers(device, framebuffers);
+    vkDestroyRenderPass(device, renderPass, nullptr);
+
+    vkDestroyCommandPool(device, cmdPool, nullptr);
+
+    DestroyImageViews(device, swapchainViews);
     vkDestroySwapchainKHR(device, swapchain, nullptr);
     vkDestroyDevice(device, nullptr);
     vkDestroySurfaceKHR(instance, surface, nullptr);
