@@ -9,6 +9,10 @@
 
 #include <GLFW/glfw3.h>
 
+#include <imgui.h>
+#include <backends/imgui_impl_glfw.h>
+#include <backends/imgui_impl_vulkan.h>
+
 #define VK_LOAD_INSTANCE_PFN(instance, name) reinterpret_cast<PFN_##name>(vkGetInstanceProcAddr(instance, #name))
 
 static VkBool32 DebugCallback(
@@ -500,6 +504,22 @@ VkSemaphore CreateSemaphore(const VkDevice device) {
     return semaphore;
 }
 
+VkResult CreateSimpleDescriptorPool(const VkDevice device, VkDescriptorPool *outDescPool) {
+
+    VkDescriptorPoolSize poolSizes[] = {
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 },
+    };
+
+    VkDescriptorPoolCreateInfo createInfo = {
+        .sType          = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .pNext          = nullptr,
+        .flags          = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
+        .maxSets        = 1,
+        .poolSizeCount  = std::size(poolSizes),
+        .pPoolSizes     = poolSizes,
+    };
+    return vkCreateDescriptorPool(device, &createInfo, nullptr, outDescPool);
+}
 
 void KeyCallback(GLFWwindow* window, int key, int /*scancode*/, int /*action*/, int /*mods*/) {
     switch (key) {
@@ -521,6 +541,11 @@ int main(int /*argc*/, char **/*argv*/) {
         printf("Failed to init GLFW!\n");
         return -1;
     }
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    (void)io;
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
@@ -546,12 +571,14 @@ int main(int /*argc*/, char **/*argv*/) {
     InitializeDebugCallback(instance, DebugCallback, nullptr, &debugMessenger);
 
     // Create the window to render onto
-    uint32_t windowWidth  = 512;
-    uint32_t windowHeight = 512;
+    uint32_t windowWidth  = 1024;
+    uint32_t windowHeight = 800;
     GLFWwindow *window    = glfwCreateWindow(windowWidth, windowHeight, "01_window GLFW", NULL, NULL);
 
     glfwSetWindowUserPointer(window, nullptr);
     glfwSetKeyCallback(window, KeyCallback);
+
+    ImGui_ImplGlfw_InitForVulkan(window, true);
 
     // We have the window, the instance, create a surface from the window to draw onto.
     // Create a Vulkan Surface using GLFW.
@@ -598,6 +625,35 @@ int main(int /*argc*/, char **/*argv*/) {
     VkRenderPass renderPass = VK_NULL_HANDLE;
     CreateSimpleRenderPass(device, surfaceInfo.format, &renderPass); // TODO: check result
 
+    VkDescriptorPool descPool = VK_NULL_HANDLE;
+    CreateSimpleDescriptorPool(device, &descPool); // TODO: check result
+
+    {
+        ImGui_ImplVulkan_InitInfo imguiInfo = {
+            .Instance       = instance,
+            .PhysicalDevice = phyDevice,
+            .Device         = device,
+            .QueueFamily    = queueFamilyIdx,
+            .Queue          = queue,
+            .DescriptorPool = descPool,
+            .RenderPass     = renderPass,
+            .MinImageCount  = 2,
+            .ImageCount     = 2,
+            .MSAASamples    = VK_SAMPLE_COUNT_1_BIT,
+            .PipelineCache  = VK_NULL_HANDLE,
+            .Subpass        = 0,
+
+            .UseDynamicRendering            = false,
+            .PipelineRenderingCreateInfo    = {},
+            .Allocator                      = nullptr,
+            .CheckVkResultFn                = nullptr,
+            .MinAllocationSize              = 1024*1024,
+        };
+        ImGui_ImplVulkan_Init(&imguiInfo);
+
+        ImGui_ImplVulkan_CreateFontsTexture();
+    }
+
     std::vector<VkFramebuffer> framebuffers = CreateSimpleFramebuffers(device, renderPass, windowWidth, windowHeight, swapchainViews);
 
     VkFence imageFence              = CreateFence(device);
@@ -605,9 +661,34 @@ int main(int /*argc*/, char **/*argv*/) {
 
     glfwShowWindow(window);
 
-    uint32_t color = 0;
+    int32_t color = 0;
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+
+        {
+            ImGui_ImplVulkan_NewFrame();
+            ImGui_ImplGlfw_NewFrame();
+            ImGui::NewFrame();
+
+            ImGui::ShowDemoWindow();
+
+            ImGui::Begin("Info");
+
+            static bool colorAutoInc = true;
+            ImGui::Checkbox("Use auto increment", &colorAutoInc);
+
+            if (colorAutoInc) {
+                color = (color + 1) % 255;
+            }
+
+            ImGui::SliderInt("Red value", &color, 0, 255);
+
+            ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / io.Framerate, io.Framerate);
+
+            ImGui::End();
+
+            ImGui::Render();
+        }
 
         vkResetFences(device, 1, &imageFence);
 
@@ -628,8 +709,6 @@ int main(int /*argc*/, char **/*argv*/) {
 
             vkBeginCommandBuffer(cmdBuffer, &beginInfo);
 
-            color = (color + 1) % 255;
-
             VkClearValue clearColor = { { { color / 255.0f, 0.0f, 0.0f, 1.0f } } };
             VkRenderPassBeginInfo renderPassInfo = {
                 .sType          = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
@@ -646,6 +725,7 @@ int main(int /*argc*/, char **/*argv*/) {
 
             vkCmdBeginRenderPass(cmdBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
+            ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmdBuffer);
             vkCmdEndRenderPass(cmdBuffer);
 
             vkEndCommandBuffer(cmdBuffer);
@@ -681,12 +761,19 @@ int main(int /*argc*/, char **/*argv*/) {
         vkDeviceWaitIdle(device);
     }
 
+    {
+        ImGui_ImplVulkan_Shutdown();
+        ImGui_ImplGlfw_Shutdown();
+        ImGui::DestroyContext();
+    }
+
     vkDestroyFence(device, imageFence, nullptr);
     vkDestroySemaphore(device, presentSemaphore, nullptr);
 
     DestroyFramebuffers(device, framebuffers);
     vkDestroyRenderPass(device, renderPass, nullptr);
 
+    vkDestroyDescriptorPool(device, descPool, nullptr);
     vkDestroyCommandPool(device, cmdPool, nullptr);
 
     DestroyImageViews(device, swapchainViews);

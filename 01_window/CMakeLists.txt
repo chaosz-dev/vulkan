@@ -4,5 +4,5 @@ add_executable(01_window
 )
 
 target_link_libraries(01_window
-    PRIVATE glfw Vulkan::Vulkan
+    PRIVATE glfw Vulkan::Vulkan imgui
 )
