@@ -19,7 +19,14 @@ set(IMGUI_SRC
     imgui/backends/imgui_impl_vulkan.h
 )
 
+# On windows remember to run `git submodule init`
+IF(WIN32)
+  add_subdirectory(glfw)
+ENDIF()
+
 add_library(imgui STATIC ${IMGUI_SRC})
 target_include_directories(imgui
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/imgui
 )
+
+target_link_libraries(imgui Vulkan::Vulkan glfw)
