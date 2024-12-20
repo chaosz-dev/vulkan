@@ -3,6 +3,13 @@
 #include <stdexcept>
 #include <vector>
 
+#include <cmath>
+
+// cmake -Bbuild -H.
+// make -C build/
+
+// ./build/bin/01_window
+
 #define GLFW_INCLUDE_VULKAN
 #define GLFW_INCLUDE_NONE
 #include <vulkan/vulkan.h>
@@ -12,6 +19,13 @@
 #include <imgui.h>
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_vulkan.h>
+
+//#include <glm/glm.hpp>
+
+namespace {
+#include "triangle.vert_include.h"
+#include "triangle.frag_include.h"
+}
 
 #define VK_LOAD_INSTANCE_PFN(instance, name) reinterpret_cast<PFN_##name>(vkGetInstanceProcAddr(instance, #name))
 
@@ -76,7 +90,8 @@ VkResult CreateVkInstance(const std::vector<const char *> &extraExtensions, bool
     std::vector<const char *> extensions = extraExtensions;
     extensions.insert(extensions.end(), debugExtensions.begin(), debugExtensions.end());
 
-    VkDebugUtilsMessengerCreateInfoEXT debugInfo = BuildDebugCallbackInfo(DebugCallback, nullptr);
+    VkDebugUtilsMessengerCreateInfoEXT debugInfo =
+        BuildDebugCallbackInfo(static_cast<PFN_vkDebugUtilsMessengerCallbackEXT>(DebugCallback), nullptr);
 
     /*
     typedef struct VkApplicationInfo {
@@ -121,7 +136,6 @@ VkResult CreateVkInstance(const std::vector<const char *> &extraExtensions, bool
         .enabledExtensionCount   = (uint32_t)extensions.size(),
         .ppEnabledExtensionNames = extensions.data(),
     };
-
     VkResult result = vkCreateInstance(&info, nullptr, outInstance);
 
     return result;
@@ -341,7 +355,6 @@ std::vector<VkImageView> Create2DImageViews(
     for (size_t idx = 0; idx < images.size(); idx++) {
         createInfo.image = images[idx];
 
-
         VkResult result = vkCreateImageView(device, &createInfo, nullptr, &views[idx]);
         if (result != VK_SUCCESS) {
             DestroyImageViews(device, views);
@@ -521,6 +534,242 @@ VkResult CreateSimpleDescriptorPool(const VkDevice device, VkDescriptorPool *out
     return vkCreateDescriptorPool(device, &createInfo, nullptr, outDescPool);
 }
 
+VkPipelineLayout CreateEmptyPipelineLayout(const VkDevice device, uint32_t pushConstantSize = 0) {
+
+    VkPushConstantRange pushConstantRange = {
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        .offset     = 0,
+        .size       = pushConstantSize,
+    };
+
+    VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {
+        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .pNext                  = nullptr,
+        .flags                  = 0,
+        .setLayoutCount         = 0,
+        .pSetLayouts            = nullptr,
+        .pushConstantRangeCount = (pushConstantSize > 0) ? 1u : 0u,
+        .pPushConstantRanges    = &pushConstantRange,
+    };
+
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    VkResult result = vkCreatePipelineLayout(device, &pipelineLayoutCreateInfo, nullptr, &layout);
+    (void)result;
+
+    return layout;
+}
+
+VkShaderModule CreateShaderModule(const VkDevice device, const uint32_t *SPIRVBinary, uint32_t SPIRVBinarySize) {
+    // SPIRVBinarySize is in bytes
+
+    VkShaderModuleCreateInfo shaderModuleCreateInfo = {
+        .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .pNext    = nullptr,
+        .flags    = 0,
+        .codeSize = SPIRVBinarySize,
+        .pCode    = SPIRVBinary,
+    };
+
+    VkShaderModule shaderModule = VK_NULL_HANDLE;
+    vkCreateShaderModule(device, &shaderModuleCreateInfo, nullptr, &shaderModule);
+    // TODO: result check
+    return shaderModule;
+}
+
+
+VkPipeline CreateSimplePipeline(
+    const VkDevice          device,
+    const VkExtent2D        surfaceExtent,
+    const VkRenderPass      renderPass,
+    const VkPipelineLayout  pipelineLayout,
+    const VkShaderModule    shaderVertex,
+    const VkShaderModule    shaderFragment) {
+
+    // shader stages
+    VkPipelineShaderStageCreateInfo shaders[] = {
+        {
+            .sType                  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .pNext                  = nullptr,
+            .flags                  = 0,
+            .stage                  = VK_SHADER_STAGE_VERTEX_BIT,
+            .module                 = shaderVertex,
+            .pName                  = "main",
+            .pSpecializationInfo    = nullptr,
+        },
+        {
+            .sType                  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .pNext                  = nullptr,
+            .flags                  = 0,
+            .stage                  = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module                 = shaderFragment,
+            .pName                  = "main",
+            .pSpecializationInfo    = nullptr,
+        }
+    };
+
+    VkPipelineVertexInputStateCreateInfo vertexInputInfo = {
+        .sType                              = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .pNext                              = 0,
+        .flags                              = 0,
+        .vertexBindingDescriptionCount      = 0u,
+        .pVertexBindingDescriptions         = nullptr,
+        .vertexAttributeDescriptionCount    = 0u,
+        .pVertexAttributeDescriptions       = nullptr,
+    };
+
+    // input assembly
+    VkPipelineInputAssemblyStateCreateInfo inputAssemblyInfo = {
+        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .pNext                  = nullptr,
+        .flags                  = 0,
+        .topology               = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .primitiveRestartEnable = VK_FALSE,
+    };
+
+    // viewport info
+    VkViewport viewport = {
+        .x          = 0,
+        .y          = 0,
+        .width      = float(surfaceExtent.width),
+        .height     = float(surfaceExtent.height),
+        .minDepth   = 0.0f,
+        .maxDepth   = 1.0f,
+    };
+
+    VkRect2D scissor {
+        .offset = { 0, 0 },
+        .extent = surfaceExtent,
+    };
+
+    VkPipelineViewportStateCreateInfo viewportInfo = {
+        .sType          = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .pNext          = nullptr,
+        .flags          = 0,
+        .viewportCount  = 1,
+        .pViewports     = &viewport,
+        .scissorCount   = 1,
+        .pScissors      = &scissor,
+    };
+
+    // rasterization info
+    // TASKS:
+    // (related top vertex shader y-flip)
+    //  1) Switch polygon mode to "wireframe".
+    //  2) Switch cull mode to front.
+    //  3) Switch front face mode to clockwise.
+    VkPipelineRasterizationStateCreateInfo rasterizationInfo = {
+        .sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .pNext                   = nullptr,
+        .flags                   = 0,
+        .depthClampEnable        = VK_FALSE,
+        .rasterizerDiscardEnable = VK_FALSE,
+        .polygonMode             = VK_POLYGON_MODE_FILL,
+        .cullMode                = VK_CULL_MODE_BACK_BIT,
+        .frontFace               = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        .depthBiasEnable         = VK_FALSE,
+        .depthBiasConstantFactor = 0.0f, // Disabled
+        .depthBiasClamp          = 0.0f, // Disabled
+        .depthBiasSlopeFactor    = 0.0f, // Disabled
+        .lineWidth               = 1.0f,
+    };
+
+    // multisample
+    VkPipelineMultisampleStateCreateInfo multisampleInfo = {
+        .sType                  = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .pNext                  = nullptr,
+        .flags                  = 0,
+        .rasterizationSamples   = VK_SAMPLE_COUNT_1_BIT,
+        .sampleShadingEnable    = VK_FALSE,
+        .minSampleShading       = 0.0f,
+        .pSampleMask            = nullptr,
+        .alphaToCoverageEnable  = VK_FALSE,
+        .alphaToOneEnable       = VK_FALSE,
+    };
+
+    // depth stencil
+    // "empty" stencil Op state
+    VkStencilOpState emptyStencilOp = {
+        .failOp      = VK_STENCIL_OP_KEEP,
+        .passOp      = VK_STENCIL_OP_KEEP,
+        .depthFailOp = VK_STENCIL_OP_KEEP,
+        .compareOp   = VK_COMPARE_OP_NEVER,
+        .compareMask = 0,
+        .writeMask   = 0,
+        .reference   = 0,
+    };
+
+    VkPipelineDepthStencilStateCreateInfo depthStencilInfo = {
+        .sType                 = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .pNext                 = nullptr,
+        .flags                 = 0,
+        .depthTestEnable       = VK_FALSE,
+        .depthWriteEnable      = VK_FALSE,
+        .depthCompareOp        = VK_COMPARE_OP_LESS,
+        .depthBoundsTestEnable = VK_FALSE,
+        .stencilTestEnable     = VK_FALSE,
+        .front                 = emptyStencilOp,
+        .back                  = emptyStencilOp,
+        .minDepthBounds        = 0.0f,
+        .maxDepthBounds        = 1.0f,
+    };
+
+    // color blend
+    VkPipelineColorBlendAttachmentState blendAttachment = {
+        .blendEnable         = VK_FALSE,
+        // as blend is disabled fill these with default values,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_COLOR,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_DST_COLOR,
+        .colorBlendOp        = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_DST_ALPHA,
+        .alphaBlendOp        = VK_BLEND_OP_ADD,
+        // Important!
+        .colorWriteMask      = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+    };
+
+    VkPipelineColorBlendStateCreateInfo colorBlendInfo = {
+        .sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .pNext           = nullptr,
+        .flags           = 0,
+        .logicOpEnable   = VK_FALSE,
+        .logicOp         = VK_LOGIC_OP_CLEAR, // Disabled
+        // Important!
+        .attachmentCount = 1,
+        .pAttachments    = &blendAttachment,
+        .blendConstants  = { 1.0f, 1.0f, 1.0f, 1.0f }, // Ignored
+    };
+
+
+    // pipeline create
+    VkGraphicsPipelineCreateInfo pipelineCreateInfo = {
+        .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext               = nullptr,
+        .flags               = 0,
+        .stageCount          = 2,
+        .pStages             = shaders,
+        .pVertexInputState   = &vertexInputInfo,
+        .pInputAssemblyState = &inputAssemblyInfo,
+        .pTessellationState  = nullptr,
+        .pViewportState      = &viewportInfo,
+        .pRasterizationState = &rasterizationInfo,
+        .pMultisampleState   = &multisampleInfo,
+        .pDepthStencilState  = &depthStencilInfo,
+        .pColorBlendState    = &colorBlendInfo,
+        .pDynamicState       = nullptr,
+        .layout              = pipelineLayout,
+        .renderPass          = renderPass,
+        .subpass             = 0,
+        .basePipelineHandle  = VK_NULL_HANDLE,
+        .basePipelineIndex   = 0,
+    };
+
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkResult result = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineCreateInfo, nullptr, &pipeline);
+    (void)result;
+
+    return pipeline;
+}
+
 void KeyCallback(GLFWwindow* window, int key, int /*scancode*/, int /*action*/, int /*mods*/) {
     switch (key) {
         case GLFW_KEY_ESCAPE: {
@@ -568,7 +817,7 @@ int main(int /*argc*/, char **/*argv*/) {
     }
 
     VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
-    InitializeDebugCallback(instance, DebugCallback, nullptr, &debugMessenger);
+    InitializeDebugCallback(instance, static_cast<PFN_vkDebugUtilsMessengerCallbackEXT>(DebugCallback), nullptr, &debugMessenger);
 
     // Create the window to render onto
     uint32_t windowWidth  = 1024;
@@ -656,6 +905,26 @@ int main(int /*argc*/, char **/*argv*/) {
 
     std::vector<VkFramebuffer> framebuffers = CreateSimpleFramebuffers(device, renderPass, windowWidth, windowHeight, swapchainViews);
 
+    // Fill the MVP matrix with identity
+    float MVP[4][4] = {
+        { 1.0f, 0.0f, 0.0f, 0.0f },
+        { 0.0f, 1.0f, 0.0f, 0.0f },
+        { 0.0f, 0.0f, 1.0f, 0.0f },
+        { 0.0f, 0.0f, 0.0f, 1.0f },
+    };
+
+    VkExtent2D surfaceExtent = { (uint32_t)windowWidth, (uint32_t)windowHeight };
+    VkPipelineLayout trianglePipelineLayout = CreateEmptyPipelineLayout(device, sizeof(MVP));
+
+    VkShaderModule shaderVertex     = CreateShaderModule(device, SPV_triangle_vert, sizeof(SPV_triangle_vert));
+    VkShaderModule shaderFragment   = CreateShaderModule(device, SPV_triangle_frag, sizeof(SPV_triangle_frag));
+
+    VkPipeline trianglePipeline = CreateSimplePipeline(device, surfaceExtent, renderPass, trianglePipelineLayout, shaderVertex, shaderFragment);
+
+    // Destroy shader modules, pipeline already created
+    vkDestroyShaderModule(device, shaderVertex, nullptr);
+    vkDestroyShaderModule(device, shaderFragment, nullptr);
+
     VkFence imageFence              = CreateFence(device);
     VkSemaphore presentSemaphore    = CreateSemaphore(device);
 
@@ -725,10 +994,30 @@ int main(int /*argc*/, char **/*argv*/) {
 
             vkCmdBeginRenderPass(cmdBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-            ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmdBuffer);
+            {
+                // TASK:
+                // Rotate around the Z-axis the triangle via MPV, use 4x4 rotation matrix
+
+                //MVP[0][0] = ...;
+                //MVP[0][1] = ...;
+                //MVP[1][0] = ...;
+                //MVP[1][1] = ...;
+
+                // Triangle bind and draw
+                vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, trianglePipeline);
+                vkCmdPushConstants(cmdBuffer, trianglePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(MVP), &MVP);
+                vkCmdDraw(cmdBuffer, 3, 1, 0, 0);
+            }
+
+            {
+                // IMGUI
+                ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmdBuffer);
+            }
+
             vkCmdEndRenderPass(cmdBuffer);
 
-            vkEndCommandBuffer(cmdBuffer);
+            VkResult endResult = vkEndCommandBuffer(cmdBuffer);
+            (void)endResult;
         }
 
         VkSubmitInfo submitInfo = {
@@ -769,6 +1058,9 @@ int main(int /*argc*/, char **/*argv*/) {
 
     vkDestroyFence(device, imageFence, nullptr);
     vkDestroySemaphore(device, presentSemaphore, nullptr);
+
+    vkDestroyPipeline(device, trianglePipeline, nullptr);
+    vkDestroyPipelineLayout(device, trianglePipelineLayout, nullptr);
 
     DestroyFramebuffers(device, framebuffers);
     vkDestroyRenderPass(device, renderPass, nullptr);
