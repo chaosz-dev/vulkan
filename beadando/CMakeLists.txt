@@ -1,6 +1,6 @@
 set(NAME beadando_kulcsar_adam)
 add_executable(${NAME}
-    11_msaa.cpp
+    project.cpp
 
     shadow_map.cpp
     lightning_pass.cpp

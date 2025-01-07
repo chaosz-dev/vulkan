@@ -1058,11 +1058,16 @@ int main(int /*argc*/, char ** /*argv*/) {
     BufferInfo lightInfo =
         BufferInfo::Create(phyDevice, device, sizeof(cubeVertices), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
 
+    Mesh cottage = Mesh(std::string("Cottage_FREE.obj").c_str(), phyDevice, device, glm::vec3(0.0f, 0.0f, 0.0f));
+
     // Fill the MVP matrix with identity
     float MVP[4][4] = {};
 
     Texture *uvTexture = Texture::LoadFromFile(phyDevice, device, queue, cmdPool, "./images/checker-map_tho.png",
                                                VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT);
+
+    Texture *cottageTexture = Texture::LoadFromFile(phyDevice, device, queue, cmdPool, "./Cottage_Clean_Base_Color.png",
+                                                    VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT);
 
     DescriptorMgmt descriptors;
     descriptors.SetDescriptor(0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1); // diffues texture
@@ -1070,7 +1075,7 @@ int main(int /*argc*/, char ** /*argv*/) {
     descriptors.SetDescriptor(2, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1);         // lightInfo
     descriptors.CreateLayout(device);
     descriptors.CreatePool(device);
-    descriptors.CreateDescriptorSets(device, 1);
+    descriptors.CreateDescriptorSets(device, 2);
 
     VkExtent2D surfaceExtent = {(uint32_t)windowWidth, (uint32_t)windowHeight};
     VkPipelineLayout trianglePipelineLayout =
@@ -1106,6 +1111,13 @@ int main(int /*argc*/, char ** /*argv*/) {
     gridSet.SetBuffer(2, lightInfo.buffer);
     gridSet.Update(device);
 
+    DescriptorSetMgmt &cottageSet = descriptors.Set(1);
+    cottageSet.SetImage(3, cottageTexture->view(), cottageTexture->sampler());
+    cottageSet.SetImage(1, shadowMap.Depth().view(), shadowMap.Depth().sampler(),
+                        VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+    cottageSet.SetBuffer(2, lightInfo.buffer);
+    cottageSet.Update(device);
+
     Texture colorOutput =
         Texture::Create2D(phyDevice, device, surfaceInfo.format, {windowWidth, windowHeight},
                           VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, msaaSamples);
@@ -1125,7 +1137,6 @@ int main(int /*argc*/, char ** /*argv*/) {
     postProcessPass.BindInputImage(device, resolvedOutput);
     postProcessPass.BindMSInputImage(device, colorOutput);
 
-    //
     Grid grid(100.0f, 100.0f, 2);
     // rotate via X axis to have it a plane
     grid.transform = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
@@ -1436,8 +1447,11 @@ int main(int /*argc*/, char ** /*argv*/) {
             vkCmdPushConstants(cmdBuffer, trianglePipelineLayout, pushFlags, 3 * sizeof(MVP) + sizeof(glm::vec4),
                                sizeof(directionalLight.position), &directionalLight.position);
 
-            vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, trianglePipelineLayout, 0, 1,
-                                    &gridSet.Get(), 0, nullptr);
+            // vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, trianglePipelineLayout, 0, 1,
+            //                         &gridSet.Get(), 0, nullptr);
+
+            // vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, trianglePipelineLayout, 0, 1,
+            //                         &cottageSet.Get(), 0, nullptr);
 
             { // our main cube
 
@@ -1457,7 +1471,31 @@ int main(int /*argc*/, char ** /*argv*/) {
                 vkCmdDraw(cmdBuffer, 36, 1, 0, 0);
             }
 
+            { // cottage
+                vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, trianglePipelineLayout, 0, 1,
+                                        &cottageSet.Get(), 0, nullptr);
+
+                glm::mat4 cottagePos(1.0f);
+
+                vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, lightPipeline);
+                vkCmdPushConstants(cmdBuffer, trianglePipelineLayout, pushFlags, 0, sizeof(MVP), &cottagePos);
+                vkCmdPushConstants(cmdBuffer, trianglePipelineLayout, pushFlags, 1 * sizeof(MVP), sizeof(MVP),
+                                   &camera.view);
+                vkCmdPushConstants(cmdBuffer, trianglePipelineLayout, pushFlags, 2 * sizeof(MVP), sizeof(MVP),
+                                   &camera.projection);
+                vkCmdPushConstants(cmdBuffer, trianglePipelineLayout, pushFlags, 3 * sizeof(MVP),
+                                   sizeof(camera.position), &camera.position);
+
+                VkDeviceSize offsets[] = {0};
+                vkCmdBindVertexBuffers(cmdBuffer, 0, 1, &cottage.m_bufferInfo.buffer, offsets);
+                vkCmdDraw(cmdBuffer, cottage.m_vertices.size(), 1, 0, 0);
+            }
+
             {
+
+                vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, trianglePipelineLayout, 0, 1,
+                                        &gridSet.Get(), 0, nullptr);
+
                 // draw the grid
                 vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                   lightPipeline); // lightPass.ShadowMapPipeline());
@@ -1484,6 +1522,7 @@ int main(int /*argc*/, char ** /*argv*/) {
                 vkCmdBindVertexBuffers(cmdBuffer, 0, 1, &cubeVertexInfo.buffer, offsets);
                 vkCmdDraw(cmdBuffer, 36, 1, 0, 0);
             }
+
             vkCmdEndRenderPass(cmdBuffer);
 
             // Post Process pass
@@ -1582,6 +1621,8 @@ int main(int /*argc*/, char ** /*argv*/) {
     vkDestroyPipelineLayout(device, trianglePipelineLayout, nullptr);
 
     grid.Destroy(device);
+
+    cottage.destroyResources(device);
 
     cubeVertexInfo.Destroy(device);
 
